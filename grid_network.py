@@ -1,0 +1,102 @@
+import numpy as np
+import torch
+import torch.nn as nn
+
+
+class GridNetwork(nn.Module):
+    """
+    RNN path integrator to develop grid cells in the hidden layer
+
+    Predicts place cell activations from velociy inputs
+    """
+    
+    def __init__(self, Np=512, Ng=4096, weight_decay=1e-4, activation='relu'):
+        super().__init__()
+        
+        self.Np = Np
+        self.Ng = Ng
+        self.weight_decay = weight_decay
+        
+        self.encoder = nn.Linear(Np, Ng, bias=False)
+        
+        self.RNN = nn.RNN(
+            input_size=2,
+            hidden_size=Ng,
+            nonlinearity=activation,
+            bias=False,
+            batch_first=False # Input shape: (seq_len, batch, features)
+        )
+        
+        # Maps grid activations to place cell predictions
+        self.decoder = nn.Linear(Ng, Np, bias=False)
+        
+        # Softmax for converting logits to probabilities
+        self.softmax = nn.Softmax(dim=-1)
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.decoder.weight)
+    
+    def g(self, velocity, init_pc):
+        """
+        Calculate grid cell activations from velocity input
+                
+        Returns grid cell activations of size (seq_len, batch, Ng)
+        """
+        h0 = self.encoder(init_pc).unsqueeze(0) # (1, batch, Ng)
+        
+        g, _ = self.RNN(velocity, h0) # (seq_len, batch, Ng)
+        
+        return g
+    
+    def forward(self, velocity, init_pc):
+        """
+        Returns predicted place_logits of size (seq_len, batch, Np) and grid cell activations of size (seq_len, batch, Ng)
+        """
+        grid_activations = self.g(velocity, init_pc)
+        place_logits = self.decoder(grid_activations)
+        return place_logits, grid_activations
+    
+    def compute_loss(self, velocity, init_pc, target_pc):
+        """
+        Computes loss with weight regularization
+
+        Returns loss with cross-entropy + weight regularization and metrics dict with 'ce_loss', 'reg_loss', 'total_loss'
+        """
+        # Get predictions
+        logits, _ = self.forward(velocity, init_pc)
+        
+        # Cross-entropy loss = -sum(y * log(softmax(pred)))
+        yhat = self.softmax(logits)
+        ce_loss = -(target_pc * torch.log(yhat + 1e-10)).sum(dim=-1).mean()
+        
+        # Weight regularlization
+        reg_loss = self.weight_decay * (self.RNN.weight_hh_l0 ** 2).sum()
+        
+        total_loss = ce_loss + reg_loss
+        
+        metrics = {
+            'ce_loss': ce_loss.item(),
+            'reg_loss': reg_loss.item(), 
+            'total_loss': total_loss.item()
+        }
+        
+        return total_loss, metrics
+    
+    def decode_position(self, place_logits, place_cell_centers, k=3):
+        """
+        Decodes position from top k place cell predictions
+        
+        Returns predicted positions of size (*, 2)            
+        """
+        _, idxs = torch.topk(place_logits, k=k, dim=-1) # (*, k)
+        pred_pos = place_cell_centers[idxs].mean(dim=-2) # (*, 2)
+        return pred_pos
+
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
