@@ -4,6 +4,9 @@ import numpy as np
 import torch
 import scipy.signal
 import scipy.ndimage
+import numpy as np
+from matplotlib.colors import hsv_to_rgb
+from scipy.fft import fft2, fftshift
 
 from datagen import GridCellDataGenerator
 from grid_network import GridNetwork, get_device
@@ -628,3 +631,36 @@ def visualize_grid_scores(model_path, n_examples=8, n_cells=None, res=32, gen_bo
     plt.show()
     
     return scores, ratemaps
+
+def get_spectral_phase_colors(rate_maps, grid_scores, mask_threshold=0.1):
+    colors = []
+    
+    for rmap, gscore in zip(rate_maps, grid_scores):
+        if np.max(rmap) < mask_threshold:
+            colors.append([0, 0, 0])
+            continue
+
+        # Compute 2D fourier transform
+        f = fft2(rmap)
+        fshift = fftshift(f) # Put low frequencies in center
+        
+        # Dominant frequency corresponds to grid periodicity
+        center_y, center_x = fshift.shape[0]//2, fshift.shape[1]//2
+        fshift[center_y, center_x] = 0 
+        
+        # Max power
+        magnitude = np.abs(fshift)
+        idx = np.argmax(magnitude)
+        py, px = np.unravel_index(idx, magnitude.shape)
+        
+        # Extract phase at frequency
+        phase_angle = np.angle(fshift[py, px]) 
+        
+        hue = (phase_angle + np.pi) / (2 * np.pi)
+        
+        sat = 1.0 
+        val = 1.0
+        
+        colors.append(hsv_to_rgb([hue, sat, val]))
+        
+    return np.array(colors)

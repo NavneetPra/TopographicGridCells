@@ -89,7 +89,8 @@ def train(args):
         )
         
         optimizer.zero_grad()
-        loss, metrics = model.compute_loss(velocity, init_pc, target_pc)
+        loss, metrics = (model.compute_loss(velocity, init_pc, target_pc) if not args.topoloss 
+                         else model.compute_topographic_loss(velocity, init_pc, target_pc))
         loss.backward()
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -109,7 +110,8 @@ def train(args):
                 error_cm = data_gen.compute_position_error(logits, positions)
             
             print(f'Step {step+1:>6,} | Loss: {avg_loss:.4f} | '
-                  f'CE: {metrics["ce_loss"]:.4f} | Reg: {metrics["reg_loss"]:.4f} | '
+                  f'CE: {metrics["ce_loss"]:.4f} | Reg: {metrics["reg_loss"]:.4f} | ' +
+                  (f'Topo: {metrics.get("topo_loss", 0.0):.4f} | ' if args.topoloss else '') +
                   f'Error: {error_cm:.1f}cm | {steps_per_sec:.1f} steps/s')
         
         # Save checkpoint
@@ -129,6 +131,9 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(description='Train grid cell network')
+
+    parser.add_argument('--topoloss', action='store_true', default=False,
+                        help='Use topographic loss (default: False)')
     
     parser.add_argument('--steps', type=int, default=50000,
                         help='Number of training steps (default: 50000)')

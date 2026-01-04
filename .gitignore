@@ -1,6 +1,7 @@
 grid_plots/
 checkpoints/
 trained_models/
+src/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

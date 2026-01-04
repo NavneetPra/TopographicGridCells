@@ -2,6 +2,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from rnn_topoloss import rnn_laplacian_pyramid_loss
+
 
 class GridNetwork(nn.Module):
     """
@@ -80,6 +82,36 @@ class GridNetwork(nn.Module):
             'ce_loss': ce_loss.item(),
             'reg_loss': reg_loss.item(), 
             'total_loss': total_loss.item()
+        }
+        
+        return total_loss, metrics
+    
+    def compute_topographic_loss(self, velocity, init_pc, target_pc):
+        """
+        Computes loss with weight regularization + topoloss
+
+        Returns loss with cross-entropy + weight regularization + topoloss and metrics dict with 'ce_loss', 'reg_loss', 'total_loss', 'topo_loss'
+        """
+        # Get predictions
+        logits, _ = self.forward(velocity, init_pc)
+        
+        # Cross-entropy loss = -sum(y * log(softmax(pred)))
+        yhat = self.softmax(logits)
+        ce_loss = -(target_pc * torch.log(yhat + 1e-10)).sum(dim=-1).mean()
+        
+        # Weight regularlization
+        reg_loss = self.weight_decay * (self.RNN.weight_hh_l0 ** 2).sum()
+
+        # Topoloss
+        topo_loss = rnn_laplacian_pyramid_loss(rnn_layer=self.RNN)
+        
+        total_loss = ce_loss + reg_loss + topo_loss
+        
+        metrics = {
+            'ce_loss': ce_loss.item(),
+            'reg_loss': reg_loss.item(), 
+            'total_loss': total_loss.item(),
+            'topo_loss': topo_loss.item()
         }
         
         return total_loss, metrics
