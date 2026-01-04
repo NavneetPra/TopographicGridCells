@@ -30,18 +30,7 @@ def rnn_laplacian_pyramid_loss(
     assert map_h * map_w == hidden_dim, \
         f"Map dimensions ({map_h}x{map_w}={map_h*map_w}) must match hidden size ({hidden_dim})"
 
-    if isinstance(rnn_layer, (nn.LSTM, nn.GRU)):
-        # Use row index as neuron index
-        num_gates = 4 if isinstance(rnn_layer, nn.LSTM) else 3
-        
-        # Reshape to (gates, hidden, input_dim)
-        w_reshaped = rearrange(weights, '(g h) i -> g h i', g=num_gates, h=hidden_dim)
-        
-        # Rearrange to (h, (g * i))
-        w_sheet_flat = rearrange(w_reshaped, 'g h i -> h (g i)')
-    else:
-        # Normal RNN
-        w_sheet_flat = weights
+    w_sheet_flat = weights
 
     # Form sheet (height, width, features)
     cortical_sheet = rearrange(w_sheet_flat, '(h w) e -> h w e', h=map_h, w=map_w)
