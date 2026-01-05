@@ -1,0 +1,34 @@
+name: topogrid
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Core Python
+  - python=3.14
+  
+  # Scientific computing
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  
+  # Jupyter
+  - ipykernel
+  - ipython
+  - jupyter_client
+  - jupyter_core
+  
+  # Pip packages
+  - pip
+  - pip:
+    # Deep learning
+    - torch
+    - torchvision
+    - einops
+    - torchtyping
+    
+    # Experiment tracking
+    - wandb
+    
+    # Topoloss from custom fork
+    - git+https://github.com/NavneetPra/topoloss.git@main#egg=topoloss

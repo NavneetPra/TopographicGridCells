@@ -3,6 +3,10 @@ checkpoints/
 trained_models/
 src/
 
+# Weights & Biases
+wandb/
+*.wandb
+
 .DS_Store
 **/.DS_Store
 

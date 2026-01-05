@@ -5,12 +5,17 @@ from datetime import datetime
 
 import torch
 import numpy as np
+import wandb
 
 from grid_network import GridNetwork, get_device
 from datagen import GridCellDataGenerator
 
+# W&B configuration
+WANDB_ENTITY = 'topogrid'
+WANDB_PROJECT = 'TopographicGridCells'
 
-def save_checkpoint(model, optimizer, step, loss, save_dir):
+
+def save_checkpoint(model, optimizer, step, loss, save_dir, log_to_wandb=True):
     os.makedirs(save_dir, exist_ok=True)
     path = os.path.join(save_dir, f'model_step_{step}.pth')
     torch.save({
@@ -20,6 +25,17 @@ def save_checkpoint(model, optimizer, step, loss, save_dir):
         'loss': loss,
     }, path)
     print(f'Saved checkpoint: {path}')
+    
+    if log_to_wandb and wandb.run is not None:
+        artifact = wandb.Artifact(
+            name=f'model-checkpoint-step-{step}',
+            type='model',
+            description=f'Model checkpoint at step {step}',
+            metadata={'step': step, 'loss': loss}
+        )
+        artifact.add_file(path)
+        wandb.log_artifact(artifact)
+    
     return path
 
 def load_checkpoint(model, optimizer, checkpoint_path):
@@ -31,7 +47,46 @@ def load_checkpoint(model, optimizer, checkpoint_path):
 def train(args):
     # Setup device
     device = get_device()
+    
+    if args.wandb_offline:
+        os.environ["WANDB_MODE"] = "offline"
+    
+    # Initialize wandb
+    run_name = args.wandb_name or f"{'topo' if args.topoloss else 'nontopo'}_{datetime.now().strftime('%m_%d_%y_%H%M')}"
+    run_group = 'topographic' if args.topoloss else 'non-topographic'
+    wandb.init(
+        entity=WANDB_ENTITY,
+        project=WANDB_PROJECT,
+        name=run_name,
+        group=run_group,
+        config={
+            # Training params
+            'steps': args.steps,
+            'batch_size': args.batch_size,
+            'seq_length': args.seq_length,
+            'learning_rate': args.lr,
+            'weight_decay': args.weight_decay,
+            'topoloss': args.topoloss,
+            # Model params
+            'n_place_cells': args.n_place_cells,
+            'n_grid_cells': args.n_grid_cells,
+            'activation': args.activation,
+            # Data generation params
+            'box_size': args.box_size,
+            'dt': args.dt,
+            'pc_width': args.pc_width,
+            'surround_scale': args.surround_scale,
+            'surround_amplitude': args.surround_amplitude,
+            'DoG': args.DoG,
+            # System info
+            'device': str(device),
+        },
+        tags=[run_group],
+        resume='allow' if args.resume else None,
+    )
+    
     print(f'\nGrid Cell Training')
+    print(f'W&B Run: {wandb.run.name} ({wandb.run.url})')
     print(f'Device: {device}')
     print(f'Steps: {args.steps:,}')
     print(f'Batch size: {args.batch_size}')
@@ -63,7 +118,11 @@ def train(args):
     n_params = sum(p.numel() for p in model.parameters())
     print(f'Model parameters: {n_params:,}')
     
+    wandb.config.update({'n_params': n_params})
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    
+    wandb.watch(model, log='all', log_freq=args.print_every)
     
     # Resume if requested
     start_step = 0
@@ -109,6 +168,18 @@ def train(args):
                 logits, _ = model(velocity, init_pc)
                 error_cm = data_gen.compute_position_error(logits, positions)
             
+            # Metrics to wandb
+            log_dict = {
+                'train/total_loss': avg_loss,
+                'train/ce_loss': metrics['ce_loss'],
+                'train/reg_loss': metrics['reg_loss'],
+                'train/position_error_cm': error_cm,
+                'train/steps_per_sec': steps_per_sec,
+            }
+            if args.topoloss:
+                log_dict['train/topo_loss'] = metrics.get('topo_loss', 0.0)
+            wandb.log(log_dict, step=step + 1)
+            
             print(f'Step {step+1:>6,} | Loss: {avg_loss:.4f} | '
                   f'CE: {metrics["ce_loss"]:.4f} | Reg: {metrics["reg_loss"]:.4f} | ' +
                   (f'Topo: {metrics.get("topo_loss", 0.0):.4f} | ' if args.topoloss else '') +
@@ -122,9 +193,31 @@ def train(args):
     save_checkpoint(model, optimizer, args.steps, losses[-1], args.save_dir)
     
     total_time = time.time() - start_time
+    final_loss = np.mean(losses[-100:])
+    
+    wandb.run.summary['final_loss'] = final_loss
+    wandb.run.summary['total_time_minutes'] = total_time / 60
+    wandb.run.summary['total_steps'] = args.steps
+    
+    final_artifact = wandb.Artifact(
+        name='model-final',
+        type='model',
+        description='Final trained model',
+        metadata={
+            'final_loss': final_loss,
+            'total_steps': args.steps,
+            'topoloss': args.topoloss
+        }
+    )
+    final_model_path = os.path.join(args.save_dir, f'model_step_{args.steps}.pth')
+    final_artifact.add_file(final_model_path)
+    wandb.log_artifact(final_artifact)
+    
+    wandb.finish()
+    
     print(f'\nTraining Complete')
     print(f'Total time: {total_time/60:.1f} minutes')
-    print(f'Final loss: {np.mean(losses[-100:]):.4f}')
+    print(f'Final loss: {final_loss:.4f}')
     print(f'Checkpoints saved to: {args.save_dir}')
     
     return model
@@ -176,12 +269,16 @@ def main():
                         help='Print progress every N steps (default: 500)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume from checkpoint (path)')
+    parser.add_argument('--wandb_name', type=str, default=None,
+                        help='Custom name for wandb run (optional)')
+    parser.add_argument('--wandb_offline', action='store_true', default=False,
+                        help='Run wandb in offline mode')
     
     args = parser.parse_args()
     
     # Create save directory
     if not args.resume:
-        timestamp = datetime.now().strftime('%m_%d_%H%M')
+        timestamp = f"{'topo' if args.topoloss else 'nontopo'}_{datetime.now().strftime('%m_%d_%y_%H%M')}"
         args.save_dir = os.path.join(args.save_dir, timestamp)
     
     train(args)
