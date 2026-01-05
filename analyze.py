@@ -664,3 +664,195 @@ def get_spectral_phase_colors(rate_maps, grid_scores, mask_threshold=0.1):
         colors.append(hsv_to_rgb([hue, sat, val]))
         
     return np.array(colors)
+
+# Logging-helper analyze functions for during training
+
+def compute_grid_scores_from_model(
+        model, 
+        data_gen, 
+        n_batches=50, 
+        batch_size=200, 
+        seq_length=20, 
+        res=32
+    ):
+    """
+    Compute grid scores directly from a model and data generator
+    
+    Returns scores (array of grid scores for each cell) and ratemaps (array of ratemaps with size (n_cells, res, res))
+    """
+    model.eval()
+    
+    # Collect activations from short trajectories
+    all_g = []
+    all_pos = []
+    
+    for i in range(n_batches):
+        velocity, init_pc, _, positions = data_gen.generate_batch(
+            batch_size=batch_size,
+            seq_length=seq_length
+        )
+        
+        with torch.no_grad():
+            g = model.g(velocity, init_pc)
+        
+        g_flat = g.reshape(-1, model.Ng).cpu().numpy()
+        pos_flat = positions.reshape(-1, 2).cpu().numpy()
+        
+        all_g.append(g_flat)
+        all_pos.append(pos_flat)
+    
+    all_g = np.concatenate(all_g, axis=0)
+    all_pos = np.concatenate(all_pos, axis=0)
+    
+    num_cells = all_g.shape[1]
+    
+    scores = np.zeros(num_cells)
+    ratemaps = np.zeros((num_cells, res, res))
+    
+    for i in range(num_cells):
+        ratemap = get_ratemap(all_pos, all_g[:, i], res=res, 
+                              box_width=data_gen.box_size, box_height=data_gen.box_size)
+        ratemaps[i] = ratemap
+        scores[i], _ = get_grid_score(ratemap)
+    
+    model.train()
+    return scores, ratemaps
+
+def create_top_ratemaps_figure(ratemaps, grid_scores, n_top=10, box_size=2.2):
+    """
+    Create a figure showing the top n ratemaps by grid score
+    
+    Returns matplotlib figure (should be closed after use)
+    """
+    sorted_idx = np.argsort(grid_scores)[::-1]
+    top_idx = sorted_idx[:n_top]
+    
+    cols = min(5, n_top)
+    rows = (n_top + cols - 1) // cols
+    
+    fig, axes = plt.subplots(rows, cols, figsize=(3 * cols, 3 * rows))
+    if rows == 1 and cols == 1:
+        axes = np.array([[axes]])
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+    elif cols == 1:
+        axes = axes.reshape(-1, 1)
+    
+    for i, idx in enumerate(top_idx):
+        row, col = i // cols, i % cols
+        ax = axes[row, col]
+        
+        im = ax.imshow(ratemaps[idx], origin='lower', 
+                       extent=[-box_size/2, box_size/2, -box_size/2, box_size/2],
+                       cmap='jet')
+        ax.set_title(f'Cell {idx}\nScore: {grid_scores[idx]:.3f}', fontsize=9)
+        ax.axis('off')
+    
+    # Hide unused axes
+    for i in range(n_top, rows * cols):
+        row, col = i // cols, i % cols
+        axes[row, col].axis('off')
+    
+    fig.suptitle(f'Top {n_top} Grid Cells by Score', fontsize=12)
+    plt.tight_layout()
+    
+    return fig
+
+def create_grid_score_histogram_figure(grid_scores, threshold=0.3):
+    """
+    Create a histogram of grid scores
+    
+    Returns matplotlib figure (should be closed after use)
+    """
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.hist(grid_scores, bins=50, edgecolor='black', alpha=0.7)
+    ax.axvline(x=threshold, color='r', linestyle='--', label=f'Threshold ({threshold})')
+    ax.axvline(x=grid_scores.mean(), color='g', linestyle='--', label=f'Mean ({grid_scores.mean():.3f})')
+    ax.set_xlabel('Grid Score')
+    ax.set_ylabel('Count')
+    ax.set_title('Distribution of Grid Scores')
+    ax.legend()
+    
+    plt.tight_layout()
+    return fig
+
+def create_topographic_phase_map_figure(ratemaps, grid_scores, mask_threshold=0.0):
+    """
+    Create a topographic phase map visualization
+    
+    Returns matplotlib figure (should be closed after use)
+    """
+    colors = get_spectral_phase_colors(ratemaps, grid_scores, mask_threshold=mask_threshold)
+    
+    side = int(np.sqrt(len(colors)))
+    topo_map = colors.reshape(side, side, 3)
+    
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(topo_map, interpolation='nearest')
+    ax.set_title("Topographic Phase Map")
+    ax.axis('off')
+    
+    plt.tight_layout()
+    return fig
+
+def create_trajectory_decoding_figure(
+        model,
+        data_gen,
+        n_trajectories=25,
+        seq_length=20
+    ):
+    """
+    Create a trajectory decoding visualization figure
+    
+    Returns matplotlib figure, mean position error in cm (matplotlib figure should be closed after use)
+    """
+    model.eval()
+    
+    velocity, init_pc, target_pc, positions = data_gen.generate_batch(
+        batch_size=n_trajectories,
+        seq_length=seq_length
+    )
+
+    with torch.no_grad():
+        place_logits, _ = model(velocity, init_pc)
+        place_cell_centers = data_gen.place_cells.us  
+        pred_pos = model.decode_position(place_logits, place_cell_centers)
+
+    pos = positions.cpu().numpy()
+    pred_pos = pred_pos.cpu().numpy()
+    us = data_gen.place_cells.us.cpu().numpy()
+
+    box_size = data_gen.box_size
+
+    # Calculate mean position error
+    pos_error = np.sqrt(((pos - pred_pos) ** 2).sum(axis=-1))
+    mean_error_cm = pos_error.mean() * 100
+
+    # Create figure
+    fig = plt.figure(figsize=(6, 6))
+    ax = fig.add_subplot(111)
+
+    # Plot place cell centers in background
+    ax.scatter(us[:, 0], us[:, 1], s=20, alpha=0.5, c='lightgrey')
+
+    for i in range(n_trajectories):
+        ax.plot(pos[:, i, 0], pos[:, i, 1], c='black', 
+                label='True position' if i == 0 else None, linewidth=2)
+        ax.plot(pred_pos[:, i, 0], pred_pos[:, i, 1], '.-', c='C1',
+                label='Decoded position' if i == 0 else None)
+
+    ax.legend()
+
+    for axis in ['top', 'bottom', 'left', 'right']:
+        ax.spines[axis].set_linewidth(3)
+    
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_xlim([-box_size / 2, box_size / 2])
+    ax.set_ylim([-box_size / 2, box_size / 2])
+    ax.set_title(f'Trajectory Decoding (Mean Error: {mean_error_cm:.2f} cm)')
+
+    plt.tight_layout()
+    
+    model.train()
+    return fig, mean_error_cm

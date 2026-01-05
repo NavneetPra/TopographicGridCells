@@ -1,5 +1,6 @@
 import argparse
 import os
+import random
 import time 
 from datetime import datetime
 
@@ -9,6 +10,13 @@ import wandb
 
 from grid_network import GridNetwork, get_device
 from datagen import GridCellDataGenerator
+from analyze import (
+    compute_grid_scores_from_model,
+    create_top_ratemaps_figure,
+    create_grid_score_histogram_figure,
+    create_topographic_phase_map_figure,
+    create_trajectory_decoding_figure
+)
 
 # W&B configuration
 WANDB_ENTITY = 'topogrid'
@@ -44,9 +52,82 @@ def load_checkpoint(model, optimizer, checkpoint_path):
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     return checkpoint['step'], checkpoint['loss']
 
+def set_seed(seed):
+    """Set seed for reproducibility across all libraries"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    return seed
+
+def log_validation_metrics(model, data_gen, step, box_size=2.2):
+    """
+    Logging validation metrics to wandb
+    
+    Logs:
+        Number of grid cells above threshold 0.3
+        Top 10 ratemaps by score
+        Grid score mean
+        Grid score histogram
+        Topographic phase map
+        Trajectory decoding visualization and error
+    """
+    print(f'\nComputing validation metrics at step {step}')
+    
+    # Compute grid scores and ratemaps
+    grid_scores, ratemaps = compute_grid_scores_from_model(
+        model, data_gen, n_batches=50, batch_size=200, seq_length=20, res=32
+    )
+    
+    # Metrics
+    n_above_threshold = int(np.sum(grid_scores > 0.3))
+    grid_score_mean = float(grid_scores.mean())
+    grid_score_max = float(grid_scores.max())
+    grid_score_median = float(np.median(grid_scores))
+    
+    # Create figures
+    top_ratemaps_fig = create_top_ratemaps_figure(ratemaps, grid_scores, n_top=10, box_size=box_size)
+    histogram_fig = create_grid_score_histogram_figure(grid_scores, threshold=0.3)
+    phase_map_fig = create_topographic_phase_map_figure(ratemaps, grid_scores, mask_threshold=0.0)
+    trajectory_fig, trajectory_error_cm = create_trajectory_decoding_figure(
+        model, data_gen, n_trajectories=25, seq_length=20
+    )
+    
+    wandb.log({
+        'validation/n_grid_cells_above_0.3': n_above_threshold,
+        'validation/grid_score_mean': grid_score_mean,
+        'validation/grid_score_max': grid_score_max,
+        'validation/grid_score_median': grid_score_median,
+        'validation/trajectory_error_cm': trajectory_error_cm,
+        'validation/top_10_ratemaps': wandb.Image(top_ratemaps_fig),
+        'validation/grid_score_histogram': wandb.Image(histogram_fig),
+        'validation/topographic_phase_map': wandb.Image(phase_map_fig),
+        'validation/trajectory_decoding': wandb.Image(trajectory_fig),
+    }, step=step)
+    
+    import matplotlib.pyplot as plt
+    plt.close(top_ratemaps_fig)
+    plt.close(histogram_fig)
+    plt.close(phase_map_fig)
+    plt.close(trajectory_fig)
+    
+    print(f'Grid cells above 0.3: {n_above_threshold} ({100*n_above_threshold/len(grid_scores):.1f}%)')
+    print(f'Grid score mean: {grid_score_mean:.3f}, max: {grid_score_max:.3f}')
+    print(f'Trajectory error: {trajectory_error_cm:.2f} cm\n')
+
 def train(args):
     # Setup device
     device = get_device()
+    
+    # Set random seed for reproducibility
+    seed = args.seed if args.seed is not None else random.randint(0, 2**32 - 1)
+    set_seed(seed)
+    print(f'Random seed: {seed}')
     
     if args.wandb_offline:
         os.environ["WANDB_MODE"] = "offline"
@@ -80,6 +161,7 @@ def train(args):
             'DoG': args.DoG,
             # System info
             'device': str(device),
+            'seed': seed,
         },
         tags=[run_group],
         resume='allow' if args.resume else None,
@@ -188,6 +270,10 @@ def train(args):
         # Save checkpoint
         if (step + 1) % args.save_every == 0:
             save_checkpoint(model, optimizer, step + 1, losses[-1], args.save_dir)
+        
+        # Validation logging every 10,000 steps
+        if (step + 1) % 10000 == 0:
+            log_validation_metrics(model, data_gen, step + 1, box_size=args.box_size)
     
     # Final save
     save_checkpoint(model, optimizer, args.steps, losses[-1], args.save_dir)
@@ -273,6 +359,8 @@ def main():
                         help='Custom name for wandb run (optional)')
     parser.add_argument('--wandb_offline', action='store_true', default=False,
                         help='Run wandb in offline mode')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for reproducibility (default: random)')
     
     args = parser.parse_args()
     
