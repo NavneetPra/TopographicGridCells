@@ -14,7 +14,9 @@ from analyze import (
     compute_grid_scores_from_model,
     create_top_ratemaps_figure,
     create_grid_score_histogram_figure,
+    create_topographic_orientation_map_figure,
     create_topographic_phase_map_figure,
+    create_topographic_scale_map_figure,
     create_trajectory_decoding_figure
 )
 
@@ -75,6 +77,8 @@ def log_validation_metrics(model, data_gen, step, box_size=2.2):
         Grid score mean
         Grid score histogram
         Topographic phase map
+        Topographic scale map
+        Topographic orientation map
         Trajectory decoding visualization and error
     """
     print(f'\nComputing validation metrics at step {step}')
@@ -97,6 +101,8 @@ def log_validation_metrics(model, data_gen, step, box_size=2.2):
     trajectory_fig, trajectory_error_cm = create_trajectory_decoding_figure(
         model, data_gen, n_trajectories=25, seq_length=20
     )
+    scale_map_fig = create_topographic_scale_map_figure(ratemaps, grid_scores, mask_threshold=0.0)
+    orientation_map_fig = create_topographic_orientation_map_figure(ratemaps, grid_scores, mask_threshold=0.0)
     
     wandb.log({
         'validation/n_grid_cells_above_0.3': n_above_threshold,
@@ -107,6 +113,8 @@ def log_validation_metrics(model, data_gen, step, box_size=2.2):
         'validation/top_10_ratemaps': wandb.Image(top_ratemaps_fig),
         'validation/grid_score_histogram': wandb.Image(histogram_fig),
         'validation/topographic_phase_map': wandb.Image(phase_map_fig),
+        'validation/topographic_scale_map': wandb.Image(scale_map_fig),
+        'validation/topographic_orientation_map': wandb.Image(orientation_map_fig),
         'validation/trajectory_decoding': wandb.Image(trajectory_fig),
     }, step=step)
     
@@ -115,6 +123,8 @@ def log_validation_metrics(model, data_gen, step, box_size=2.2):
     plt.close(histogram_fig)
     plt.close(phase_map_fig)
     plt.close(trajectory_fig)
+    plt.close(scale_map_fig)
+    plt.close(orientation_map_fig)
     
     print(f'Grid cells above 0.3: {n_above_threshold} ({100*n_above_threshold/len(grid_scores):.1f}%)')
     print(f'Grid score mean: {grid_score_mean:.3f}, max: {grid_score_max:.3f}')
@@ -132,9 +142,19 @@ def train(args):
     if args.wandb_offline:
         os.environ["WANDB_MODE"] = "offline"
     
+    # Determine training mode
+    if args.dtl:
+        mode_name = 'dtl'
+        run_group = 'decomposed-topographic'
+    elif args.topoloss:
+        mode_name = 'topo'
+        run_group = 'topographic'
+    else:
+        mode_name = 'nontopo'
+        run_group = 'non-topographic'
+    
     # Initialize wandb
-    run_name = args.wandb_name or f"{'topo' if args.topoloss else 'nontopo'}_{datetime.now().strftime('%m_%d_%y_%H%M')}"
-    run_group = 'topographic' if args.topoloss else 'non-topographic'
+    run_name = args.wandb_name or f"{mode_name}_{datetime.now().strftime('%m_%d_%y_%H%M')}"
     wandb.init(
         entity=WANDB_ENTITY,
         project=WANDB_PROJECT,
@@ -148,6 +168,9 @@ def train(args):
             'learning_rate': args.lr,
             'weight_decay': args.weight_decay,
             'topoloss': args.topoloss,
+            'dtl': args.dtl,
+            'scale_weight': args.scale_weight if args.dtl else None,
+            'phase_weight': args.phase_weight if args.dtl else None,
             # Model params
             'n_place_cells': args.n_place_cells,
             'n_grid_cells': args.n_grid_cells,
@@ -230,8 +253,19 @@ def train(args):
         )
         
         optimizer.zero_grad()
-        loss, metrics = (model.compute_loss(velocity, init_pc, target_pc) if not args.topoloss 
-                         else model.compute_topographic_loss(velocity, init_pc, target_pc))
+        
+        # Loss based on args
+        if args.dtl:
+            loss, metrics = model.compute_dtl_loss(
+                velocity, init_pc, target_pc,
+                scale_weight=args.scale_weight,
+                phase_weight=args.phase_weight
+            )
+        elif args.topoloss:
+            loss, metrics = model.compute_topographic_loss(velocity, init_pc, target_pc)
+        else:
+            loss, metrics = model.compute_loss(velocity, init_pc, target_pc)
+        
         loss.backward()
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -260,11 +294,16 @@ def train(args):
             }
             if args.topoloss:
                 log_dict['train/topo_loss'] = metrics.get('topo_loss', 0.0)
+            if args.dtl:
+                log_dict['train/dtl_loss'] = metrics.get('dtl_loss', 0.0)
+                log_dict['train/scale_loss'] = metrics.get('scale_loss', 0.0)
+                log_dict['train/phase_loss'] = metrics.get('phase_loss', 0.0)
             wandb.log(log_dict, step=step + 1)
             
             print(f'Step {step+1:>6,} | Loss: {avg_loss:.4f} | '
                   f'CE: {metrics["ce_loss"]:.4f} | Reg: {metrics["reg_loss"]:.4f} | ' +
                   (f'Topo: {metrics.get("topo_loss", 0.0):.4f} | ' if args.topoloss else '') +
+                  (f'DTL: {metrics.get("dtl_loss", 0.0):.4f} (S:{metrics.get("scale_loss", 0.0):.4f} P:{metrics.get("phase_loss", 0.0):.4f}) | ' if args.dtl else '') +
                   f'Error: {error_cm:.1f}cm | {steps_per_sec:.1f} steps/s')
         
         # Save checkpoint
@@ -313,6 +352,12 @@ def main():
 
     parser.add_argument('--topoloss', action='store_true', default=False,
                         help='Use topographic loss (default: False)')
+    parser.add_argument('--dtl', action='store_true', default=False,
+                        help='Use decomposed topographic loss (default: False)')
+    parser.add_argument('--scale_weight', type=float, default=1.0,
+                        help='Weight for scale topography loss in DTL (default: 1.0)')
+    parser.add_argument('--phase_weight', type=float, default=0.1,
+                        help='Weight for phase diversity loss in DTL (default: 0.1)')
     
     parser.add_argument('--steps', type=int, default=50000,
                         help='Number of training steps (default: 50000)')
@@ -366,7 +411,13 @@ def main():
     
     # Create save directory
     if not args.resume:
-        timestamp = f"{'topo' if args.topoloss else 'nontopo'}_{datetime.now().strftime('%m_%d_%y_%H%M')}"
+        if args.dtl:
+            mode = 'dtl'
+        elif args.topoloss:
+            mode = 'topo'
+        else:
+            mode = 'nontopo'
+        timestamp = f"{mode}_{datetime.now().strftime('%m_%d_%y_%H%M')}"
         args.save_dir = os.path.join(args.save_dir, timestamp)
     
     train(args)

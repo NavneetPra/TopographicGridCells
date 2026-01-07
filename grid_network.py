@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from rnn_topoloss import rnn_laplacian_pyramid_loss
+from rnn_topoloss import rnn_laplacian_pyramid_loss, rnn_decomposed_topographic_loss
 
 
 class GridNetwork(nn.Module):
@@ -112,6 +112,58 @@ class GridNetwork(nn.Module):
             'reg_loss': reg_loss.item(), 
             'total_loss': total_loss.item(),
             'topo_loss': topo_loss.item()
+        }
+        
+        return total_loss, metrics
+    
+    def compute_dtl_loss(self, velocity, init_pc, target_pc, scale_weight=1.0, phase_weight=0.1):
+        """
+        Computes loss with Decomposed Topographic Loss (DTL)
+        
+        DTL creates biologically-accurate grid cell topography:
+        - Scale topography: nearby neurons have similar grid spacing
+        - Phase diversity: nearby neurons have different grid offsets
+        
+        This matches the modular organization in entorhinal cortex where
+        grid cells within a module share scale but have random phases.
+        
+        Args:
+            velocity: Velocity inputs (seq_len, batch, 2)
+            init_pc: Initial place cell activations (batch, Np)
+            target_pc: Target place cell activations (seq_len, batch, Np)
+            scale_weight: Weight for scale topography loss (λ_scale)
+            phase_weight: Weight for phase diversity loss (λ_phase)
+        
+        Returns:
+            total_loss: Combined loss value
+            metrics: Dict with loss components
+        """
+        # Get predictions
+        logits, _ = self.forward(velocity, init_pc)
+        
+        # Cross-entropy loss
+        yhat = self.softmax(logits)
+        ce_loss = -(target_pc * torch.log(yhat + 1e-10)).sum(dim=-1).mean()
+        
+        # Weight regularization
+        reg_loss = self.weight_decay * (self.RNN.weight_hh_l0 ** 2).sum()
+        
+        # Decomposed Topographic Loss
+        dtl_loss, dtl_metrics = rnn_decomposed_topographic_loss(
+            rnn_layer=self.RNN,
+            scale_weight=scale_weight,
+            phase_weight=phase_weight,
+        )
+        
+        total_loss = ce_loss + reg_loss + dtl_loss
+        
+        metrics = {
+            'ce_loss': ce_loss.item(),
+            'reg_loss': reg_loss.item(),
+            'total_loss': total_loss.item(),
+            'dtl_loss': dtl_loss.item(),
+            'scale_loss': dtl_metrics['scale_loss'],
+            'phase_loss': dtl_metrics['phase_loss'],
         }
         
         return total_loss, metrics

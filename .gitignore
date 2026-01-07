@@ -3,6 +3,8 @@ checkpoints/
 trained_models/
 src/
 
+notebooks/loss_function_exploration.ipynb
+
 # Weights & Biases
 wandb/
 *.wandb
