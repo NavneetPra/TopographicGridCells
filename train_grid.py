@@ -9,6 +9,7 @@ import numpy as np
 import wandb
 
 from grid_network import GridNetwork, get_device
+from tau_grid_network import TauGridNetwork
 from datagen import GridCellDataGenerator
 from analyze import (
     compute_grid_scores_from_model,
@@ -143,7 +144,10 @@ def train(args):
         os.environ["WANDB_MODE"] = "offline"
     
     # Determine training mode
-    if args.dtl:
+    if args.tau:
+        mode_name = 'tau'
+        run_group = 'tau-topographic'
+    elif args.dtl:
         mode_name = 'dtl'
         run_group = 'decomposed-topographic'
     elif args.topoloss:
@@ -169,6 +173,14 @@ def train(args):
             'weight_decay': args.weight_decay,
             'topoloss': args.topoloss,
             'dtl': args.dtl,
+            'tau': args.tau,
+            'tau_min': args.tau_min if args.tau else None,
+            'tau_max': args.tau_max if args.tau else None,
+            'tau_init': args.tau_init if args.tau else None,
+            'learnable_tau': args.learnable_tau if args.tau else None,
+            'tau_smoothness_weight': args.tau_smoothness_weight if args.tau else None,
+            'tau_variance_weight': args.tau_variance_weight if args.tau else None,
+            'tau_orientation_weight': args.tau_orientation_weight if args.tau else None,
             'scale_weight': args.scale_weight if args.dtl else None,
             'phase_weight': args.phase_weight if args.dtl else None,
             # Model params
@@ -200,6 +212,9 @@ def train(args):
     print(f'Grid cells: {args.n_grid_cells}')
     print(f'Learning rate: {args.lr}')
     print(f'Weight decay: {args.weight_decay}')
+    if args.tau:
+        print(f'Tau-based RNN: tau_min={args.tau_min}, tau_max={args.tau_max}, init={args.tau_init}')
+        print(f'Tau learnable: {args.learnable_tau}')
     print()
     
     data_gen = GridCellDataGenerator(
@@ -213,12 +228,28 @@ def train(args):
         device=device
     )
     
-    model = GridNetwork(
-        Np=args.n_place_cells,
-        Ng=args.n_grid_cells,
-        weight_decay=args.weight_decay,
-        activation=args.activation
-    ).to(device)
+    # Create model based on mode
+    if args.tau:
+        model = TauGridNetwork(
+            Np=args.n_place_cells,
+            Ng=args.n_grid_cells,
+            weight_decay=args.weight_decay,
+            activation=args.activation,
+            tau_min=args.tau_min,
+            tau_max=args.tau_max,
+            tau_init=args.tau_init,
+            learnable_tau=args.learnable_tau,
+            n_modules=args.n_modules,
+        ).to(device)
+        print(f'Using TauGridNetwork with tau range [{args.tau_min}, {args.tau_max}]')
+    else:
+        model = GridNetwork(
+            Np=args.n_place_cells,
+            Ng=args.n_grid_cells,
+            weight_decay=args.weight_decay,
+            activation=args.activation
+        ).to(device)
+        print(f'Using GridNetwork')
     
     n_params = sum(p.numel() for p in model.parameters())
     print(f'Model parameters: {n_params:,}')
@@ -254,8 +285,33 @@ def train(args):
         
         optimizer.zero_grad()
         
-        # Loss based on args
-        if args.dtl:
+        # Loss by args
+        if args.tau:
+            if args.tau_orientation_weight > 0 and args.learnable_tau:
+                # Full topographic loss
+                loss, metrics = model.compute_full_topographic_loss(
+                    velocity, init_pc, target_pc,
+                    tau_smoothness_weight=args.tau_smoothness_weight,
+                    tau_variance_weight=args.tau_variance_weight,
+                    orientation_weight=args.tau_orientation_weight
+                )
+            elif args.learnable_tau and (args.tau_smoothness_weight > 0 or args.tau_variance_weight > 0):
+                # Tau topographic loss only
+                loss, metrics = model.compute_tau_topographic_loss(
+                    velocity, init_pc, target_pc,
+                    tau_smoothness_weight=args.tau_smoothness_weight,
+                    tau_variance_weight=args.tau_variance_weight
+                )
+            elif args.tau_orientation_weight > 0:
+                # Orientation topographic loss only
+                loss, metrics = model.compute_orientation_loss(
+                    velocity, init_pc, target_pc,
+                    orientation_weight=args.tau_orientation_weight
+                )
+            else:
+                # Standard loss
+                loss, metrics = model.compute_loss(velocity, init_pc, target_pc)
+        elif args.dtl:
             loss, metrics = model.compute_dtl_loss(
                 velocity, init_pc, target_pc,
                 scale_weight=args.scale_weight,
@@ -298,13 +354,32 @@ def train(args):
                 log_dict['train/dtl_loss'] = metrics.get('dtl_loss', 0.0)
                 log_dict['train/scale_loss'] = metrics.get('scale_loss', 0.0)
                 log_dict['train/phase_loss'] = metrics.get('phase_loss', 0.0)
+            if args.tau:
+                log_dict['train/tau_mean'] = metrics.get('tau_mean', model.tau.mean().item())
+                log_dict['train/tau_min'] = metrics.get('tau_min', model.tau.min().item())
+                log_dict['train/tau_max'] = metrics.get('tau_max', model.tau.max().item())
+                log_dict['train/tau_variance'] = metrics.get('tau_variance', model.tau.var().item())
+                if 'tau_loss' in metrics:
+                    log_dict['train/tau_loss'] = metrics['tau_loss']
+                if 'orient_loss' in metrics:
+                    log_dict['train/orient_loss'] = metrics['orient_loss']
             wandb.log(log_dict, step=step + 1)
             
-            print(f'Step {step+1:>6,} | Loss: {avg_loss:.4f} | '
-                  f'CE: {metrics["ce_loss"]:.4f} | Reg: {metrics["reg_loss"]:.4f} | ' +
-                  (f'Topo: {metrics.get("topo_loss", 0.0):.4f} | ' if args.topoloss else '') +
-                  (f'DTL: {metrics.get("dtl_loss", 0.0):.4f} (S:{metrics.get("scale_loss", 0.0):.4f} P:{metrics.get("phase_loss", 0.0):.4f}) | ' if args.dtl else '') +
-                  f'Error: {error_cm:.1f}cm | {steps_per_sec:.1f} steps/s')
+            # Build print string
+            print_str = f'Step {step+1:>6,} | Loss: {avg_loss:.4f} | CE: {metrics["ce_loss"]:.4f} | Reg: {metrics["reg_loss"]:.4f}'
+            if args.topoloss:
+                print_str += f' | Topo: {metrics.get("topo_loss", 0.0):.4f}'
+            if args.dtl:
+                print_str += f' | DTL: {metrics.get("dtl_loss", 0.0):.4f} (S:{metrics.get("scale_loss", 0.0):.4f} P:{metrics.get("phase_loss", 0.0):.4f})'
+            if args.tau:
+                tau_str = f' | tau:[{model.tau.min().item():.1f},{model.tau.max().item():.1f}]'
+                if 'tau_loss' in metrics:
+                    tau_str += f' TL:{metrics["tau_loss"]:.4f}'
+                if 'orient_loss' in metrics:
+                    tau_str += f' OL:{metrics["orient_loss"]:.4f}'
+                print_str += tau_str
+            print_str += f' | Error: {error_cm:.1f}cm | {steps_per_sec:.1f} steps/s'
+            print(print_str)
         
         # Save checkpoint
         if (step + 1) % args.save_every == 0:
@@ -331,7 +406,8 @@ def train(args):
         metadata={
             'final_loss': final_loss,
             'total_steps': args.steps,
-            'topoloss': args.topoloss
+            'topoloss': args.topoloss,
+            'tau': args.tau if hasattr(args, 'tau') else False,
         }
     )
     final_model_path = os.path.join(args.save_dir, f'model_step_{args.steps}.pth')
@@ -358,6 +434,28 @@ def main():
                         help='Weight for scale topography loss in DTL (default: 1.0)')
     parser.add_argument('--phase_weight', type=float, default=0.1,
                         help='Weight for phase diversity loss in DTL (default: 0.1)')
+    
+    parser.add_argument('--tau', action='store_true', default=False,
+                        help='Use tau-based RNN with per-neuron time constants (default: False)')
+    parser.add_argument('--tau_min', type=float, default=1.0,
+                        help='Minimum time constant for tau-RNN (default: 1.0)')
+    parser.add_argument('--tau_max', type=float, default=50.0,
+                        help='Maximum time constant for tau-RNN (default: 50.0)')
+    parser.add_argument('--tau_init', type=str, default='random',
+                        choices=['gradient', 'random', 'uniform', 'modules', 'radial'],
+                        help='Tau initialization strategy (default: random)')
+    parser.add_argument('--learnable_tau', action='store_true', default=True,
+                        help='Make tau learnable (default: True)')
+    parser.add_argument('--fixed_tau', action='store_false', dest='learnable_tau',
+                        help='Keep tau fixed (not learnable)')
+    parser.add_argument('--n_modules', type=int, default=4,
+                        help='Number of modules for tau_init=modules (default: 4)')
+    parser.add_argument('--tau_smoothness_weight', type=float, default=1.0,
+                        help='Weight for tau smoothness loss (default: 1.0, only used if tau is learnable)')
+    parser.add_argument('--tau_variance_weight', type=float, default=0.1,
+                        help='Weight for tau variance loss (default: 0.1, only used if tau is learnable)')
+    parser.add_argument('--tau_orientation_weight', type=float, default=1.0,
+                        help='Weight for orientation topography loss with tau model (default: 1.0)')
     
     parser.add_argument('--steps', type=int, default=50000,
                         help='Number of training steps (default: 50000)')
@@ -411,7 +509,9 @@ def main():
     
     # Create save directory
     if not args.resume:
-        if args.dtl:
+        if args.tau:
+            mode = 'tau'
+        elif args.dtl:
             mode = 'dtl'
         elif args.topoloss:
             mode = 'topo'

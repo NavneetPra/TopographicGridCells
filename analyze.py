@@ -1003,3 +1003,24 @@ def create_trajectory_decoding_figure(
     
     model.train()
     return fig, mean_error_cm
+
+def create_tau_map_figure(tau_model):
+    """
+    Create a visualization of the tau distribution
+    
+    Returns matplotlib figure (should be closed after use)
+    """
+    tau = tau_model.tau.detach().cpu().numpy()
+    side = int(np.sqrt(len(tau)))
+    tau_2d = tau.reshape(side, side)
+    
+    fig, ax = plt.subplots(figsize=(8, 8))
+    im = ax.imshow(tau_2d, cmap='viridis', interpolation='nearest')
+    ax.set_title("Tau Map")
+    ax.axis('off')
+    
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Time Constant (tau)")
+    
+    plt.tight_layout()
+    return fig

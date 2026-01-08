@@ -90,7 +90,7 @@ class GridNetwork(nn.Module):
         """
         Computes loss with weight regularization + topoloss
 
-        Returns loss with cross-entropy + weight regularization + topoloss and metrics dict with 'ce_loss', 'reg_loss', 'total_loss', 'topo_loss'
+        Returns loss with cross-entropy + weight regularization + topoloss and metrics dict with 'ce_loss', 'reg_loss', 'total_loss', 'dtl_loss', 'scale_loss', 'phase_loss'
         """
         # Get predictions
         logits, _ = self.forward(velocity, init_pc)
@@ -118,25 +118,9 @@ class GridNetwork(nn.Module):
     
     def compute_dtl_loss(self, velocity, init_pc, target_pc, scale_weight=1.0, phase_weight=0.1):
         """
-        Computes loss with Decomposed Topographic Loss (DTL)
-        
-        DTL creates biologically-accurate grid cell topography:
-        - Scale topography: nearby neurons have similar grid spacing
-        - Phase diversity: nearby neurons have different grid offsets
-        
-        This matches the modular organization in entorhinal cortex where
-        grid cells within a module share scale but have random phases.
-        
-        Args:
-            velocity: Velocity inputs (seq_len, batch, 2)
-            init_pc: Initial place cell activations (batch, Np)
-            target_pc: Target place cell activations (seq_len, batch, Np)
-            scale_weight: Weight for scale topography loss (λ_scale)
-            phase_weight: Weight for phase diversity loss (λ_phase)
-        
-        Returns:
-            total_loss: Combined loss value
-            metrics: Dict with loss components
+        Computes loss with scale topography and phase topography
+
+        Returns loss with cross-entropy + weight regularization + decomposed_topographic_loss and metrics dict with 'ce_loss', 'reg_loss', 'total_loss', 'topo_loss'
         """
         # Get predictions
         logits, _ = self.forward(velocity, init_pc)
@@ -148,7 +132,6 @@ class GridNetwork(nn.Module):
         # Weight regularization
         reg_loss = self.weight_decay * (self.RNN.weight_hh_l0 ** 2).sum()
         
-        # Decomposed Topographic Loss
         dtl_loss, dtl_metrics = rnn_decomposed_topographic_loss(
             rnn_layer=self.RNN,
             scale_weight=scale_weight,
