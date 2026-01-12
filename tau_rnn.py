@@ -230,6 +230,60 @@ def tau_topographic_loss(
     
     return total_loss, metrics
 
+def tau_topographic_loss_v2(
+    tau_rnn,
+    factor = 2.0,
+    smoothness_weight = 1.0,
+    variance_weight = 0.1,
+):
+    """
+    Topographic loss for tau values
+
+    Spatial smoothness for nearby neurons and variance for global diversity
+    
+        tau_rnn: The TauRNN module
+        factor: Downsampling factor for Laplacian pyramid
+        smoothness_weight: Weight for local smoothness loss
+        variance_weight: Weight for variance loss
+    """
+    tau = tau_rnn.tau
+    side = tau_rnn.side
+    
+    tau_2d = tau.view(1, 1, side, side)
+    
+    # Smoothness
+    downscaled = F.interpolate(tau_2d, scale_factor=1/factor, mode='bilinear', align_corners=False)
+    upscaled = F.interpolate(downscaled, size=(side, side), mode='bilinear', align_corners=False)
+    
+    smoothness_loss = ((tau_2d - upscaled) ** 2).mean()
+    
+    # Variance
+    tau_sorted, _ = torch.sort(tau.flatten())
+    
+    # Ideal uniform distribution
+    n_units = tau.numel()
+    current_min = tau.min().detach()
+    current_max = tau.max().detach()
+    
+    # Linear ramp
+    target_dist = torch.linspace(current_min, current_max, n_units, device=tau.device)
+    
+    # Compare actual to linear ramp
+    variance_loss = F.mse_loss(tau_sorted, target_dist)
+    
+    total_loss = smoothness_weight * smoothness_loss + variance_weight * variance_loss
+    
+    metrics = {
+        'tau_smoothness': smoothness_loss.item(),
+        'tau_variance': tau.var().item(),
+        'tau_mean': tau.mean().item(),
+        'tau_min': tau.min().item(),
+        'tau_max': tau.max().item(),
+        'total_tau_loss': total_loss.item(),
+    }
+    
+    return total_loss, metrics
+
 def rnn_orientation_topographic_loss(
     rnn_layer,
     side = 64,
@@ -279,7 +333,7 @@ def rnn_weight_norm_topo_loss(rnn_layer, map_h, map_w):
     cortical_sheet = rearrange(weight_norms, '(h w) -> h w 1', h=map_h, w=map_w)
     
     # Smoothness
-    smoothness_loss = laplacian_pyramid_norm_loss(cortical_sheet, ...)
+    smoothness_loss = laplacian_pyramid_norm_loss(cortical_sheet)
     
     # Variance
     std_dev = weight_norms.std()

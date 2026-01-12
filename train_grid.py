@@ -363,6 +363,8 @@ def train(args):
                     log_dict['train/tau_loss'] = metrics['tau_loss']
                 if 'orient_loss' in metrics:
                     log_dict['train/orient_loss'] = metrics['orient_loss']
+                if 'norm_loss' in metrics:
+                    log_dict['train/norm_loss'] = metrics['norm_loss']
             wandb.log(log_dict, step=step + 1)
             
             # Build print string

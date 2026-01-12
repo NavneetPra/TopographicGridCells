@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from tau_rnn import TauRNN, tau_topographic_loss, rnn_orientation_topographic_loss
+from tau_rnn import TauRNN, rnn_weight_norm_topo_loss, tau_topographic_loss, rnn_orientation_topographic_loss, tau_topographic_loss_v2
 
 
 class TauGridNetwork(nn.Module):
@@ -220,6 +220,9 @@ class TauGridNetwork(nn.Module):
         
         # Weight regularization
         reg_loss = self.weight_decay * (self.RNN.weight_hh_l0 ** 2).sum()
+
+        # Norm loss
+        norm_loss = rnn_weight_norm_topo_loss(self.RNN, 64, 64)
         
         # Tau topographic loss
         tau_loss, tau_metrics = tau_topographic_loss(
@@ -234,7 +237,7 @@ class TauGridNetwork(nn.Module):
             side=self.RNN.side,
         )
         
-        total_loss = ce_loss + reg_loss + tau_loss + orientation_weight * orient_loss
+        total_loss = ce_loss + reg_loss + tau_loss + (orientation_weight * orient_loss) + norm_loss
         
         metrics = {
             'ce_loss': ce_loss.item(),
@@ -242,6 +245,7 @@ class TauGridNetwork(nn.Module):
             'tau_loss': tau_loss.item(),
             'orient_loss': orient_loss.item(),
             'total_loss': total_loss.item(),
+            'norm_loss': norm_loss.item(),
             **tau_metrics,
             **orient_metrics,
         }
