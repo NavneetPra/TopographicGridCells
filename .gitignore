@@ -1,7 +1,9 @@
 grid_plots/
 checkpoints/
-trained_models/
+initial_trained_models/
 src/
+
+notebooks/loss_function_exploration.ipynb
 
 # Weights & Biases
 wandb/

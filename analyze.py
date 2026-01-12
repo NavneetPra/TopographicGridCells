@@ -1,5 +1,5 @@
 import os
-from matplotlib import pyplot as plt
+from matplotlib import cm, pyplot as plt
 import numpy as np
 import torch
 import scipy.signal
@@ -7,6 +7,7 @@ import scipy.ndimage
 import numpy as np
 from matplotlib.colors import hsv_to_rgb
 from scipy.fft import fft2, fftshift
+import matplotlib.colors as mcolors
 
 from datagen import GridCellDataGenerator
 from grid_network import GridNetwork, get_device
@@ -665,6 +666,93 @@ def get_spectral_phase_colors(rate_maps, grid_scores, mask_threshold=0.1):
         
     return np.array(colors)
 
+def get_spectral_scale_colors(rate_maps, grid_scores, mask_threshold=0.1):
+    scales = []
+    valid_indices = []
+
+    # Calculate scales/frequencies
+    for i, (rmap, gscore) in enumerate(zip(rate_maps, grid_scores)):
+        if np.max(rmap) < mask_threshold:
+            scales.append(None) 
+            continue
+
+        f = fft2(rmap)
+        fshift = fftshift(f)
+        center_y, center_x = fshift.shape[0]//2, fshift.shape[1]//2
+        fshift[center_y, center_x] = 0 
+
+        magnitude = np.abs(fshift)
+        idx = np.argmax(magnitude)
+        py, px = np.unravel_index(idx, magnitude.shape)
+
+        # Distance is inversely proportional to scale
+        dist = np.sqrt((py - center_y)**2 + (px - center_x)**2)
+
+        scale_metric = 1.0 / dist if dist != 0 else 0
+
+        scales.append(scale_metric)
+        valid_indices.append(i)
+
+    colors = np.zeros((len(rate_maps), 3)) 
+
+    valid_scales = np.array([s for s in scales if s is not None])
+
+    if len(valid_scales) > 0:
+        s_min, s_max = valid_scales.min(), valid_scales.max()
+
+        if s_max > s_min:
+            norm_scales = (valid_scales - s_min) / (s_max - s_min)
+        else:
+            norm_scales = np.zeros_like(valid_scales)
+
+        cmap = plt.get_cmap('viridis')
+
+        count = 0
+        for i in range(len(rate_maps)):
+            if scales[i] is None:
+                colors[i] = [0, 0, 0] 
+            else:
+                colors[i] = cmap(norm_scales[count])[:3] 
+                count += 1
+
+    return colors
+
+def get_spectral_orientation_colors(rate_maps, grid_scores, mask_threshold=0.1):
+    colors = []
+
+    for rmap, gscore in zip(rate_maps, grid_scores):
+        if np.max(rmap) < mask_threshold:
+            colors.append([0, 0, 0])
+            continue
+
+        f = fft2(rmap)
+        fshift = fftshift(f)
+        center_y, center_x = fshift.shape[0]//2, fshift.shape[1]//2
+        fshift[center_y, center_x] = 0 
+
+        magnitude = np.abs(fshift)
+        idx = np.argmax(magnitude)
+        py, px = np.unravel_index(idx, magnitude.shape)
+
+        # Angle of peak relative to center
+        angle = np.arctan2(py - center_y, px - center_x)
+
+        if angle < 0:
+            angle += 2 * np.pi
+
+        # Map orientation to 6-fold symmetry
+        symmetry_mod = np.pi / 3
+        orientation = angle % symmetry_mod
+
+        hue = orientation / symmetry_mod
+
+        sat = 1.0 
+        val = 1.0
+
+        colors.append(mcolors.hsv_to_rgb([hue, sat, val]))
+
+    return np.array(colors)
+
 # Logging-helper analyze functions for during training
 
 def compute_grid_scores_from_model(
@@ -792,8 +880,62 @@ def create_topographic_phase_map_figure(ratemaps, grid_scores, mask_threshold=0.
     ax.set_title("Topographic Phase Map")
     ax.axis('off')
     
+    norm = mcolors.Normalize(vmin=-np.pi, vmax=np.pi)
+    sm = cm.ScalarMappable(norm=norm, cmap='hsv')
+    sm.set_array([])
+
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Fourier Phase (radians)")
+
     plt.tight_layout()
     return fig
+
+def create_topographic_scale_map_figure(ratemaps, grid_scores, mask_threshold=0.0):
+    """
+    Visualizes the grid spacing (scale) topography
+    Returns matplotlib figure (should be closed after use)
+    """
+    colors = get_spectral_scale_colors(ratemaps, grid_scores, mask_threshold=mask_threshold)
+
+    side = int(np.sqrt(len(colors)))
+    topo_map = colors.reshape(side, side, 3)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    im = ax.imshow(topo_map, interpolation='nearest')
+    ax.set_title("Topographic Scale Map (Spacing)")
+    ax.axis('off')
+
+    norm = mcolors.Normalize(vmin=0.0, vmax=1.0)
+    sm = cm.ScalarMappable(norm=norm, cmap='viridis')
+    sm.set_array([])
+
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Relative Grid Scale (normalized)")
+
+    plt.tight_layout()
+    return fig
+
+def create_topographic_orientation_map_figure(ratemaps, grid_scores, mask_threshold=0.0):
+    """
+    Visualizes the grid orientation topography
+    Returns matplotlib figure (should be closed after use)
+    """
+    colors = get_spectral_orientation_colors(ratemaps, grid_scores, mask_threshold=mask_threshold)
+
+    side = int(np.sqrt(len(colors)))
+    topo_map = colors.reshape(side, side, 3)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(topo_map, interpolation='nearest')
+    ax.set_title("Topographic Orientation Map")
+    ax.axis('off')
+
+    norm = mcolors.Normalize(vmin=0, vmax=np.pi / 3)
+    sm = cm.ScalarMappable(norm=norm, cmap='hsv')
+    sm.set_array([])
+
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Grid Orientation (radians, mod π/3)")
 
 def create_trajectory_decoding_figure(
         model,
@@ -856,3 +998,24 @@ def create_trajectory_decoding_figure(
     
     model.train()
     return fig, mean_error_cm
+
+def create_tau_map_figure(tau_model):
+    """
+    Create a visualization of the tau distribution
+    
+    Returns matplotlib figure (should be closed after use)
+    """
+    tau = tau_model.tau.detach().cpu().numpy()
+    side = int(np.sqrt(len(tau)))
+    tau_2d = tau.reshape(side, side)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    im = ax.imshow(tau_2d, cmap='viridis', interpolation='nearest')
+    ax.set_title("Tau Map")
+    ax.axis('off')
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Time Constant (tau)")
+
+    plt.tight_layout()
+    return fig

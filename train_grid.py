@@ -9,12 +9,15 @@ import numpy as np
 import wandb
 
 from grid_network import GridNetwork, get_device
+from tau_grid_network import TauGridNetwork
 from datagen import GridCellDataGenerator
 from analyze import (
     compute_grid_scores_from_model,
     create_top_ratemaps_figure,
     create_grid_score_histogram_figure,
+    create_topographic_orientation_map_figure,
     create_topographic_phase_map_figure,
+    create_topographic_scale_map_figure,
     create_trajectory_decoding_figure
 )
 
@@ -75,6 +78,8 @@ def log_validation_metrics(model, data_gen, step, box_size=2.2):
         Grid score mean
         Grid score histogram
         Topographic phase map
+        Topographic scale map
+        Topographic orientation map
         Trajectory decoding visualization and error
     """
     print(f'\nComputing validation metrics at step {step}')
@@ -97,7 +102,9 @@ def log_validation_metrics(model, data_gen, step, box_size=2.2):
     trajectory_fig, trajectory_error_cm = create_trajectory_decoding_figure(
         model, data_gen, n_trajectories=25, seq_length=20
     )
-    
+    scale_map_fig = create_topographic_scale_map_figure(ratemaps, grid_scores, mask_threshold=0.0)
+    orientation_map_fig = create_topographic_orientation_map_figure(ratemaps, grid_scores, mask_threshold=0.0)
+
     wandb.log({
         'validation/n_grid_cells_above_0.3': n_above_threshold,
         'validation/grid_score_mean': grid_score_mean,
@@ -107,6 +114,8 @@ def log_validation_metrics(model, data_gen, step, box_size=2.2):
         'validation/top_10_ratemaps': wandb.Image(top_ratemaps_fig),
         'validation/grid_score_histogram': wandb.Image(histogram_fig),
         'validation/topographic_phase_map': wandb.Image(phase_map_fig),
+        'validation/topographic_scale_map': wandb.Image(scale_map_fig),
+        'validation/topographic_orientation_map': wandb.Image(orientation_map_fig),
         'validation/trajectory_decoding': wandb.Image(trajectory_fig),
     }, step=step)
     
@@ -115,6 +124,8 @@ def log_validation_metrics(model, data_gen, step, box_size=2.2):
     plt.close(histogram_fig)
     plt.close(phase_map_fig)
     plt.close(trajectory_fig)
+    plt.close(scale_map_fig)
+    plt.close(orientation_map_fig)
     
     print(f'Grid cells above 0.3: {n_above_threshold} ({100*n_above_threshold/len(grid_scores):.1f}%)')
     print(f'Grid score mean: {grid_score_mean:.3f}, max: {grid_score_max:.3f}')
@@ -132,9 +143,19 @@ def train(args):
     if args.wandb_offline:
         os.environ["WANDB_MODE"] = "offline"
     
+    # Determine training mode
+    if args.tau:
+        mode_name = 'tau'
+        run_group = 'tau-topographic'
+    elif args.topoloss:
+        mode_name = 'topo'
+        run_group = 'topographic'
+    else:
+        mode_name = 'nontopo'
+        run_group = 'non-topographic'
+
     # Initialize wandb
-    run_name = args.wandb_name or f"{'topo' if args.topoloss else 'nontopo'}_{datetime.now().strftime('%m_%d_%y_%H%M')}"
-    run_group = 'topographic' if args.topoloss else 'non-topographic'
+    run_name = args.wandb_name or f"{mode_name}_{datetime.now().strftime('%m_%d_%y_%H%M')}"
     wandb.init(
         entity=WANDB_ENTITY,
         project=WANDB_PROJECT,
@@ -148,6 +169,13 @@ def train(args):
             'learning_rate': args.lr,
             'weight_decay': args.weight_decay,
             'topoloss': args.topoloss,
+            'tau': args.tau,
+            'tau_min': args.tau_min if args.tau else None,
+            'tau_max': args.tau_max if args.tau else None,
+            'tau_init': args.tau_init if args.tau else None,
+            'learnable_tau': args.learnable_tau if args.tau else None,
+            'tau_smoothness_weight': args.tau_smoothness_weight if args.tau else None,
+            'tau_variance_weight': args.tau_variance_weight if args.tau else None,
             # Model params
             'n_place_cells': args.n_place_cells,
             'n_grid_cells': args.n_grid_cells,
@@ -177,6 +205,9 @@ def train(args):
     print(f'Grid cells: {args.n_grid_cells}')
     print(f'Learning rate: {args.lr}')
     print(f'Weight decay: {args.weight_decay}')
+    if args.tau:
+        print(f'Tau-based RNN: tau_min={args.tau_min}, tau_max={args.tau_max}, init={args.tau_init}')
+        print(f'Tau learnable: {args.learnable_tau}')
     print()
     
     data_gen = GridCellDataGenerator(
@@ -190,12 +221,28 @@ def train(args):
         device=device
     )
     
-    model = GridNetwork(
-        Np=args.n_place_cells,
-        Ng=args.n_grid_cells,
-        weight_decay=args.weight_decay,
-        activation=args.activation
-    ).to(device)
+    # Create model based on mode
+    if args.tau:
+        model = TauGridNetwork(
+            Np=args.n_place_cells,
+            Ng=args.n_grid_cells,
+            weight_decay=args.weight_decay,
+            activation=args.activation,
+            tau_min=args.tau_min,
+            tau_max=args.tau_max,
+            tau_init=args.tau_init,
+            learnable_tau=args.learnable_tau,
+            n_modules=args.n_modules,
+        ).to(device)
+        print(f'Using TauGridNetwork with tau range [{args.tau_min}, {args.tau_max}]')
+    else:
+        model = GridNetwork(
+            Np=args.n_place_cells,
+            Ng=args.n_grid_cells,
+            weight_decay=args.weight_decay,
+            activation=args.activation
+        ).to(device)
+        print(f'Using GridNetwork')
     
     n_params = sum(p.numel() for p in model.parameters())
     print(f'Model parameters: {n_params:,}')
@@ -230,8 +277,17 @@ def train(args):
         )
         
         optimizer.zero_grad()
-        loss, metrics = (model.compute_loss(velocity, init_pc, target_pc) if not args.topoloss 
-                         else model.compute_topographic_loss(velocity, init_pc, target_pc))
+        # Loss by args
+        if args.tau:
+            loss, metrics = model.compute_tau_topographic_loss(
+                velocity, init_pc, target_pc,
+                tau_smoothness_weight=args.tau_smoothness_weight,
+                tau_variance_weight=args.tau_variance_weight
+            )
+        elif args.topoloss:
+            loss, metrics = model.compute_topographic_loss(velocity, init_pc, target_pc)
+        else:
+            loss, metrics = model.compute_loss(velocity, init_pc, target_pc)
         loss.backward()
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -260,12 +316,24 @@ def train(args):
             }
             if args.topoloss:
                 log_dict['train/topo_loss'] = metrics.get('topo_loss', 0.0)
+            if args.tau:
+                log_dict['train/tau_mean'] = metrics.get('tau_mean', model.tau.mean().item())
+                log_dict['train/tau_min'] = metrics.get('tau_min', model.tau.min().item())
+                log_dict['train/tau_max'] = metrics.get('tau_max', model.tau.max().item())
+                log_dict['train/tau_variance'] = metrics.get('tau_variance', model.tau.var().item())
+                log_dict['train/tau_loss'] = metrics['tau_loss']
             wandb.log(log_dict, step=step + 1)
             
-            print(f'Step {step+1:>6,} | Loss: {avg_loss:.4f} | '
-                  f'CE: {metrics["ce_loss"]:.4f} | Reg: {metrics["reg_loss"]:.4f} | ' +
-                  (f'Topo: {metrics.get("topo_loss", 0.0):.4f} | ' if args.topoloss else '') +
-                  f'Error: {error_cm:.1f}cm | {steps_per_sec:.1f} steps/s')
+            # Build print string
+            print_str = f'Step {step+1:>6,} | Loss: {avg_loss:.4f} | CE: {metrics["ce_loss"]:.4f} | Reg: {metrics["reg_loss"]:.4f}'
+            if args.topoloss:
+                print_str += f' | Topo: {metrics.get("topo_loss", 0.0):.4f}'
+            if args.tau:
+                tau_str = f' | tau:[{model.tau.min().item():.1f},{model.tau.max().item():.1f}]'
+                tau_str += f' TL:{metrics["tau_loss"]:.4f}'
+                print_str += tau_str
+            print_str += f' | Error: {error_cm:.1f}cm | {steps_per_sec:.1f} steps/s'
+            print(print_str)
         
         # Save checkpoint
         if (step + 1) % args.save_every == 0:
@@ -292,7 +360,8 @@ def train(args):
         metadata={
             'final_loss': final_loss,
             'total_steps': args.steps,
-            'topoloss': args.topoloss
+            'topoloss': args.topoloss,
+            'tau': args.tau if hasattr(args, 'tau') else False,
         }
     )
     final_model_path = os.path.join(args.save_dir, f'model_step_{args.steps}.pth')
@@ -313,6 +382,26 @@ def main():
 
     parser.add_argument('--topoloss', action='store_true', default=False,
                         help='Use topographic loss (default: False)')
+    
+    parser.add_argument('--tau', action='store_true', default=False,
+                        help='Use tau-based RNN with per-neuron time constants (default: False)')
+    parser.add_argument('--tau_min', type=float, default=1.0,
+                        help='Minimum time constant for tau-RNN (default: 1.0)')
+    parser.add_argument('--tau_max', type=float, default=50.0,
+                        help='Maximum time constant for tau-RNN (default: 50.0)')
+    parser.add_argument('--tau_init', type=str, default='random',
+                        choices=['gradient', 'random', 'uniform', 'modules', 'radial'],
+                        help='Tau initialization strategy (default: random)')
+    parser.add_argument('--learnable_tau', action='store_true', default=True,
+                        help='Make tau learnable (default: True)')
+    parser.add_argument('--fixed_tau', action='store_false', dest='learnable_tau',
+                        help='Keep tau fixed (not learnable)')
+    parser.add_argument('--n_modules', type=int, default=4,
+                        help='Number of modules for tau_init=modules (default: 4)')
+    parser.add_argument('--tau_smoothness_weight', type=float, default=1.0,
+                        help='Weight for tau smoothness loss (default: 1.0, only used if tau is learnable)')
+    parser.add_argument('--tau_variance_weight', type=float, default=0.1,
+                        help='Weight for tau variance loss (default: 0.1, only used if tau is learnable)')
     
     parser.add_argument('--steps', type=int, default=50000,
                         help='Number of training steps (default: 50000)')
@@ -366,7 +455,13 @@ def main():
     
     # Create save directory
     if not args.resume:
-        timestamp = f"{'topo' if args.topoloss else 'nontopo'}_{datetime.now().strftime('%m_%d_%y_%H%M')}"
+        if args.tau:
+            mode = 'tau'
+        elif args.topoloss:
+            mode = 'topo'
+        else:
+            mode = 'nontopo'
+        timestamp = f"{mode}_{datetime.now().strftime('%m_%d_%y_%H%M')}"
         args.save_dir = os.path.join(args.save_dir, timestamp)
     
     train(args)
