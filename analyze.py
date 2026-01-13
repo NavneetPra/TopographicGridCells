@@ -937,6 +937,9 @@ def create_topographic_orientation_map_figure(ratemaps, grid_scores, mask_thresh
     cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("Grid Orientation (radians, mod π/3)")
 
+    plt.tight_layout()
+    return fig
+
 def create_trajectory_decoding_figure(
         model,
         data_gen,
