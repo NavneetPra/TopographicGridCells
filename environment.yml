@@ -33,5 +33,8 @@ dependencies:
     # Experiment tracking
     - wandb
     
+    # Trajectory and place cell generation
+    - ratinabox
+    
     # Topoloss from custom fork
     - git+https://github.com/NavneetPra/topoloss.git@main#egg=topoloss

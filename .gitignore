@@ -5,6 +5,10 @@ src/
 
 notebooks/loss_function_exploration.ipynb
 
+data_cache/
+
+notes.txt
+
 # Weights & Biases
 wandb/
 *.wandb

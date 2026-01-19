@@ -218,8 +218,16 @@ def train(args):
         surround_scale=args.surround_scale,
         surround_amplitude=args.surround_amplitude,
         DoG=args.DoG,
-        device=device
+        device=device,
+        sequence_length=args.seq_length  # Needed for cache matching
     )
+    
+    # Try to preload cache
+    cache_loaded = data_gen.load_cache()
+    if not cache_loaded:
+        print("No cache found")
+        print("For faster training, run: python datagen.py --generate --n 100000")
+        print()
     
     # Create model based on mode
     if args.tau:

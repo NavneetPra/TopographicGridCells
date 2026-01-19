@@ -42,3 +42,30 @@ def rnn_laplacian_pyramid_loss(
         factor_h=factor_h,
         interpolation=interpolation
     )
+
+def rnn_laplacian_pyramid_loss_ih(
+    rnn_layer: nn.RNNBase,
+    map_h: int = 64, 
+    map_w: int = 64, 
+    factor_h: float = 2.0, 
+    factor_w: float = 2.0, 
+):
+    """
+    Adapts laplacian_pyramid_loss for RNN layers with input weights
+    """
+
+    input_weights = rnn_layer.weight_ih_l0 # Shape: (Ng, 2)
+    cortical_sheet = rearrange(
+        input_weights, 
+        "(h w) e -> h w e", 
+        h=map_h, 
+        w=map_w
+    )
+    
+    wiring_cost = laplacian_pyramid_loss(
+        cortical_sheet=cortical_sheet,
+        factor_h=factor_h,
+        factor_w=factor_w,
+    )
+
+    return wiring_cost
