@@ -5,10 +5,10 @@ from pathlib import Path
 
 from ratinabox.Environment import Environment
 from ratinabox.Agent import Agent
-from ratinabox.Neurons import PlaceCells
+from sm_pc import SM_PlaceCells
 
 
-class _PlaceCellsWrapper:
+class _SM_PlaceCellsWrapper:
     """
     Compatability for analysis code
     """
@@ -21,7 +21,7 @@ class GridCellDataGenerator:
 
         Box size: 2.2m x 2.2m centered at origin (-1.1 to 1.1)
         dt: 0.02s (20ms timesteps)
-        Place cell width: 0.12m
+        Place cell width: 0.2m
         DoG (Difference of Gaussians) for place cells
     """
 
@@ -30,7 +30,7 @@ class GridCellDataGenerator:
         n_place_cells: int = 512,
         box_size: float = 2.2,
         dt: float = 0.02,
-        place_cell_width: float = 0.12,
+        place_cell_width: float = 0.2,
         surround_scale: float = 2.0,
         surround_amplitude: float = 0.5, 
         DoG: bool = True,
@@ -46,7 +46,7 @@ class GridCellDataGenerator:
             n_place_cells: Number of place cells (512)
             box_size: Size of square environment in meters (2.2)
             dt: Timestep in seconds (0.02)
-            place_cell_width: Place cell width in meters (0.12)
+            place_cell_width: Place cell width in meters (0.2)
             surround_scale: Scale factor for surround inhibition in DoG (2.0)
             surround_amplitude: Amplitude of surround inhibition (0.5)
             DoG: Use Difference of Gaussians for place cells (True)
@@ -79,7 +79,7 @@ class GridCellDataGenerator:
         })
         
         # Agent for place cell initialization (parameters adjusted to match ganguli lab implementation)
-        self.mean_speed = 1.02
+        self.mean_speed = 0.1
         self.template_agent = Agent(self.env, params={
             'dt': dt,
             'speed_mean': self.mean_speed,
@@ -96,11 +96,12 @@ class GridCellDataGenerator:
         place_cell_centres = self.env.sample_positions(n=n_place_cells, method='uniform_jitter')
         
         if DoG:
-            pc_description = 'diff_of_gaussians'
+            #pc_description = 'diff_of_gaussians'
+            pc_description = 'diff_of_softmax'
         else:
             pc_description = 'gaussian'
         
-        self.place_cells_riab = PlaceCells(self.template_agent, params={
+        self.place_cells_riab = SM_PlaceCells(self.template_agent, params={
             'n': n_place_cells,
             'widths': place_cell_width,
             'place_cell_centres': place_cell_centres,
@@ -119,7 +120,7 @@ class GridCellDataGenerator:
         )
         
         # Compatability
-        self.place_cells = _PlaceCellsWrapper(self.us)
+        self.place_cells = _SM_PlaceCellsWrapper(self.us)
         
         np.random.seed(None)
         
@@ -226,7 +227,7 @@ class GridCellDataGenerator:
         if cache_file is None and auto_find:
             cache_dir = Path(__file__).parent / "data_cache"
             if cache_dir.exists():
-                pattern = f"trajectories_*_seq{self.sequence_length}_pc{self.n_place_cells}.npz"
+                pattern = f"new_trajectories_*_seq{self.sequence_length}_pc{self.n_place_cells}.npz"
                 matches = list(cache_dir.glob(pattern))
                 if matches:
                     # Use most trajectories
@@ -269,7 +270,7 @@ class GridCellDataGenerator:
         
         agent = Agent(self.env, params={
             'dt': self.dt,
-            'speed_mean': 1.02,
+            'speed_mean': 0.1,
             'speed_std': 0.53,
             'speed_coherence_time': 0.5,
             'rotational_velocity_std': 120 * np.pi / 180,
@@ -289,7 +290,7 @@ class GridCellDataGenerator:
         for _ in range(seq_length):
             agent.update()
             positions.append(agent.pos.copy())
-            velocities.append(agent.velocity.copy() * self.dt)
+            velocities.append(agent.velocity.copy())
         
         ratinabox.verbose = original_verbose
         
@@ -479,8 +480,8 @@ def main():
                         help='Box size in meters (default: 2.2)')
     parser.add_argument('--dt', type=float, default=0.02,
                         help='Timestep in seconds (default: 0.02)')
-    parser.add_argument('--pc-width', type=float, default=0.12,
-                        help='Place cell width/sigma (default: 0.12)')
+    parser.add_argument('--pc-width', type=float, default=0.2,
+                        help='Place cell width/sigma (default: 0.2)')
     parser.add_argument('--test', action='store_true',
                         help='Quick test of data generator')
     parser.add_argument('--benchmark', action='store_true',

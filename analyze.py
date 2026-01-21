@@ -47,7 +47,7 @@ def visualize_cells(
         activation='relu', 
         gen_box_size=2.2, 
         gen_dt=0.02, 
-        gen_pc_width=0.12, 
+        gen_pc_width=0.2, 
         gen_surround_scale=2.0, 
         gen_surround_amplitude=0.5, 
         gen_dog=True,
@@ -182,7 +182,7 @@ def visualize_pred(
         activation='relu', 
         gen_box_size=2.2, 
         gen_dt=0.02, 
-        gen_pc_width=0.12, 
+        gen_pc_width=0.2, 
         gen_surround_scale=2.0, 
         gen_surround_amplitude=0.5, 
         gen_dog=True
@@ -275,7 +275,7 @@ def visualize_trajectory_decoding(
         activation='relu', 
         gen_box_size=2.2, 
         gen_dt=0.02, 
-        gen_pc_width=0.12, 
+        gen_pc_width=0.2, 
         gen_surround_scale=2.0, 
         gen_surround_amplitude=0.5, 
         gen_dog=True
@@ -476,7 +476,7 @@ def compute_grid_scores(
         activation='relu', 
         gen_box_size=2.2, 
         gen_dt=0.02, 
-        gen_pc_width=0.12, 
+        gen_pc_width=0.2, 
         gen_surround_scale=2.0, 
         gen_surround_amplitude=0.5, 
         gen_dog=True
@@ -633,11 +633,11 @@ def visualize_grid_scores(model_path, n_examples=8, n_cells=None, res=32, gen_bo
     
     return scores, ratemaps
 
-def get_spectral_phase_colors(rate_maps, grid_scores, mask_threshold=0.1):
+def get_spectral_phase_colors(rate_maps, grid_scores, mask_threshold=0.1, gscore_threshold=0.0):
     colors = []
     
     for rmap, gscore in zip(rate_maps, grid_scores):
-        if np.max(rmap) < mask_threshold:
+        if np.max(rmap) < mask_threshold or gscore < gscore_threshold:
             colors.append([0, 0, 0])
             continue
 
@@ -666,13 +666,13 @@ def get_spectral_phase_colors(rate_maps, grid_scores, mask_threshold=0.1):
         
     return np.array(colors)
 
-def get_spectral_scale_colors(rate_maps, grid_scores, mask_threshold=0.1):
+def get_spectral_scale_colors(rate_maps, grid_scores, mask_threshold=0.1, gscore_threshold=0.0):
     scales = []
     valid_indices = []
 
     # Calculate scales/frequencies
     for i, (rmap, gscore) in enumerate(zip(rate_maps, grid_scores)):
-        if np.max(rmap) < mask_threshold:
+        if np.max(rmap) < mask_threshold or gscore < gscore_threshold:
             scales.append(None) 
             continue
 
@@ -717,11 +717,11 @@ def get_spectral_scale_colors(rate_maps, grid_scores, mask_threshold=0.1):
 
     return colors
 
-def get_spectral_orientation_colors(rate_maps, grid_scores, mask_threshold=0.1):
+def get_spectral_orientation_colors(rate_maps, grid_scores, mask_threshold=0.1, gscore_threshold=0.0):
     colors = []
 
     for rmap, gscore in zip(rate_maps, grid_scores):
-        if np.max(rmap) < mask_threshold:
+        if np.max(rmap) < mask_threshold or gscore < gscore_threshold:
             colors.append([0, 0, 0])
             continue
 
@@ -864,13 +864,13 @@ def create_grid_score_histogram_figure(grid_scores, threshold=0.3):
     plt.tight_layout()
     return fig
 
-def create_topographic_phase_map_figure(ratemaps, grid_scores, mask_threshold=0.0):
+def create_topographic_phase_map_figure(ratemaps, grid_scores, mask_threshold=0.0, gscore_threshold=0.0):
     """
     Create a topographic phase map visualization
     
     Returns matplotlib figure (should be closed after use)
     """
-    colors = get_spectral_phase_colors(ratemaps, grid_scores, mask_threshold=mask_threshold)
+    colors = get_spectral_phase_colors(ratemaps, grid_scores, mask_threshold=mask_threshold, gscore_threshold=gscore_threshold)
     
     side = int(np.sqrt(len(colors)))
     topo_map = colors.reshape(side, side, 3)
@@ -890,12 +890,12 @@ def create_topographic_phase_map_figure(ratemaps, grid_scores, mask_threshold=0.
     plt.tight_layout()
     return fig
 
-def create_topographic_scale_map_figure(ratemaps, grid_scores, mask_threshold=0.0):
+def create_topographic_scale_map_figure(ratemaps, grid_scores, mask_threshold=0.0, gscore_threshold=0.0):
     """
     Visualizes the grid spacing (scale) topography
     Returns matplotlib figure (should be closed after use)
     """
-    colors = get_spectral_scale_colors(ratemaps, grid_scores, mask_threshold=mask_threshold)
+    colors = get_spectral_scale_colors(ratemaps, grid_scores, mask_threshold=mask_threshold, gscore_threshold=gscore_threshold)
 
     side = int(np.sqrt(len(colors)))
     topo_map = colors.reshape(side, side, 3)
@@ -915,12 +915,12 @@ def create_topographic_scale_map_figure(ratemaps, grid_scores, mask_threshold=0.
     plt.tight_layout()
     return fig
 
-def create_topographic_orientation_map_figure(ratemaps, grid_scores, mask_threshold=0.0):
+def create_topographic_orientation_map_figure(ratemaps, grid_scores, mask_threshold=0.0, gscore_threshold=0.0):
     """
     Visualizes the grid orientation topography
     Returns matplotlib figure (should be closed after use)
     """
-    colors = get_spectral_orientation_colors(ratemaps, grid_scores, mask_threshold=mask_threshold)
+    colors = get_spectral_orientation_colors(ratemaps, grid_scores, mask_threshold=mask_threshold, gscore_threshold=gscore_threshold)
 
     side = int(np.sqrt(len(colors)))
     topo_map = colors.reshape(side, side, 3)

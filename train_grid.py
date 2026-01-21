@@ -257,7 +257,7 @@ def train(args):
     
     wandb.config.update({'n_params': n_params})
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.RMSprop(model.parameters(), lr=args.lr)
     
     wandb.watch(model, log='all', log_freq=args.print_every)
     
@@ -433,8 +433,8 @@ def main():
                         help='Environment size in meters (default: 2.2)')
     parser.add_argument('--dt', type=float, default=0.02,
                         help='Timestep in seconds (default: 0.02)')
-    parser.add_argument('--pc_width', type=float, default=0.12,
-                        help='Place cell width/sigma (default: 0.12)')
+    parser.add_argument('--pc_width', type=float, default=0.2,
+                        help='Place cell width/sigma (default: 0.2)')
     parser.add_argument('--surround_scale', type=float, default=2.0,
                         help='DoG surround scale (default: 2.0)')
     parser.add_argument('--surround_amplitude', type=float, default=0.5,
